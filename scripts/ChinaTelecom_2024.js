@@ -211,6 +211,43 @@ class Widget extends DmYY {
   };
 
   getData = async () => {
+    // 从配置中获取数据源类型
+    const dataSource = this.settings.data_source || 'telecom';
+    const { filterOrientateFlow, showUsedFlow } = this.settings;
+    
+    if (dataSource === 'boxjs') {
+      const response = await this.http({
+        url: 'http://boxjs.com/query/data/PackgeDetail'
+      });
+
+      const data = JSON.parse(response.val)
+      
+      // 转换为统一格式
+      const unifiedData = {
+        flow: {
+          commonFlow: {
+            total: data?.flowInfo?.commonFlow?.total || 0,
+            balance: data?.flowInfo?.commonFlow?.balance || 0,
+            used: (data?.flowInfo?.commonFlow?.total || 0) - (data?.flowInfo?.commonFlow?.balance || 0)
+          },
+          specialFlow: {
+            total: data?.flowInfo?.specialAmount?.total || 0,
+            balance: data?.flowInfo?.specialAmount?.balance || 0,
+            used: (data?.flowInfo?.specialAmount?.total || 0) - (data?.flowInfo?.specialAmount?.balance || 0)
+          }
+        },
+        voice: {
+          total: data?.voiceInfo?.total || 0,
+          balance: data?.voiceInfo?.balance || 0
+        },
+        balance: data?.balanceInfo?.balance || 0
+      };
+      
+      this.updateTelecomData(unifiedData, {filterOrientateFlow, showUsedFlow});
+      return;
+    }
+    
+    // 原有的电信数据处理逻辑
     if (!this.settings.china_telecom_url) {
       return this.notify(this.name, "请配置登录地址");
     }
@@ -221,108 +258,115 @@ class Widget extends DmYY {
         Cookie: this.settings.cookie,
       },
     });
+    
+    // 初始化统一格式数据
+    const unifiedData = {
+      flow: {
+        commonFlow: { total: 0, balance: 0, used: 0 },
+        specialFlow: { total: 0, balance: 0, used: 0 }
+      },
+      voice: { total: 0, balance: 0 },
+      balance: 0
+    };
 
-    const { filterOrientateFlow, showUsedFlow } = this.settings;
-    // 总流量
-    let totalFlowAmount = 0;
-    // 剩余流量
-    let totalBalanceFlowAmount = 0;
-    // 已用流量
-    let totalUsedFlowAmount = 0;
-    // 总语音
-    let totalVoiceAmount = 0;
-    // 剩余语音
-    let totalBalanceVoiceAmount = 0;
-    // 语音
-    if (response?.voiceAmount && response?.voiceBalance) {
-      totalVoiceAmount = response.voiceAmount;
-      totalBalanceVoiceAmount = response.voiceBalance;
-    }
-    // 流量&语音
+    // 检测无限流量包
     let isUnlimitedFlow = false;
     response?.items?.forEach((data) => {
       if (data.offerType !== 19) {
         data.items?.forEach((item) => {
           if (item.unitTypeId == 3) {
             if (!(item.usageAmount == 0 && item.balanceAmount == 0)) {
-              let ratableResourcename = item.ratableResourcename;
-              let ratableAmount = item.ratableAmount;
-              let balanceAmount = item.balanceAmount;
-              let usedAmount = ratableAmount - balanceAmount;
-              if (filterOrientateFlow === 'true' && ratableResourcename.search('定向') != -1 || balanceAmount == '999999999999') {
-                ratableAmount = 0;
-                balanceAmount = 0;
+              const isSpecialFlow = item.ratableResourcename?.search('定向') != -1 || item.balanceAmount == '999999999999';
+              const flowType = isSpecialFlow ? 'specialFlow' : 'commonFlow';
+              
+              unifiedData.flow[flowType].total += parseFloat(item.ratableAmount);
+              unifiedData.flow[flowType].balance += parseFloat(item.balanceAmount);
+              unifiedData.flow[flowType].used += parseFloat(item.usageAmount);
+              
+              if (data.offerType == 21 && item.ratableAmount == '0') {
+                isUnlimitedFlow = true;
               }
-              totalFlowAmount += parseFloat(ratableAmount);
-              totalBalanceFlowAmount += parseFloat(balanceAmount);
-            }
-            totalUsedFlowAmount += parseFloat(item.usageAmount);
-            if (showUsedFlow === 'true') {
-              this.flow.title = '已用流量';
-            }
-
-            if (data.offerType == 21 && item.ratableAmount == '0') {
-              // 无限流量用户
-              isUnlimitedFlow = true;
             }
           } else if (!response.voiceBalance && item.unitTypeId == 1) {
-            totalVoiceAmount += parseInt(item.ratableAmount);
-            totalBalanceVoiceAmount += parseInt(item.balanceAmount);
+            unifiedData.voice.total += parseInt(item.ratableAmount);
+            unifiedData.voice.balance += parseInt(item.balanceAmount);
           }
         });
       }
     });
-    const totalFlowObj = this.formatFlow(totalFlowAmount);
-    const totalBalanceFlowObj = this.formatFlow(totalBalanceFlowAmount);
-    const totalUsedFlowObj = this.formatFlow(totalUsedFlowAmount);
-    const finalBalanceFlowObj = showUsedFlow === 'true' ? totalUsedFlowObj : totalBalanceFlowObj;
-    this.flow.title = '剩余流量';
-    if (showUsedFlow === 'true') this.flow.title = '已用流量';
-    
-    // 设置流量
-    this.flow.percent = ((totalBalanceFlowAmount / (totalFlowAmount || 1)) * 100).toFixed(2);
-    this.flow.number = finalBalanceFlowObj.amount;
-    this.flow.unit = finalBalanceFlowObj.unit;
-    this.flow.en = finalBalanceFlowObj.unit;
-    
-    if (isUnlimitedFlow) {
-      const usageAmountObj = this.formatFlow(totalUsedFlowAmount);
-      this.flow.title = '已用流量';
-      this.flow.number = usageAmountObj.amount;
-      this.flow.unit = usageAmountObj.unit;
-      this.flow.en = usageAmountObj.unit;
-    }
-    // 设置语音
-    this.voice.percent = ((totalBalanceVoiceAmount / (totalVoiceAmount || 1)) * 100).toFixed(2);
-    this.voice.number = totalBalanceVoiceAmount;
 
+    // 获取话费余额
     const balance = await this.http({
       url: this.fetchUrl.balance,
       headers: {
         Cookie: this.settings.cookie,
       },
     });
-    console.log(balance)
     
-    balance.totalBalanceAvailable = Number(balance.totalBalanceAvailable);
+    unifiedData.balance = balance.totalBalanceAvailable / 100;
 
-    this.fee.number = balance.totalBalanceAvailable / 100;
+    // 处理统一格式数据
+    this.updateTelecomData(unifiedData, {
+      filterOrientateFlow,
+      // 如果检测到无限流量包，强制显示已用流量
+      showUsedFlow: isUnlimitedFlow || showUsedFlow
+    });
+  };
 
+  updateTelecomData = (data, config) => {
+    const { filterOrientateFlow, showUsedFlow } = config;
+    
+    // 处理流量数据
+    let totalFlow = 0;
+    let balanceFlow = 0;
+    let usedFlow = 0;
+    
+    // 处理通用流量
+    if (data.flow?.commonFlow) {
+      totalFlow += data.flow.commonFlow.total;
+      balanceFlow += data.flow.commonFlow.balance;
+      usedFlow += data.flow.commonFlow.used;
+    }
+    
+    // 处理定向流量
+    if (data.flow?.specialFlow) {
+      if (filterOrientateFlow !== 'true') {
+        totalFlow += data.flow.specialFlow.total;
+        balanceFlow += data.flow.specialFlow.balance;
+        usedFlow += data.flow.specialFlow.used;
+      }
+    }
+    
+    // 处理语音数据
+    const voiceData = {
+      total: data.voice?.total || 0,
+      balance: data.voice?.balance || 0
+    };
+    
+    // 处理话费数据
+    const balance = data.balance || 0;
+    
+    // 设置流量显示
+    const flowObj = showUsedFlow === 'true' ? 
+      this.formatFlow(usedFlow) : 
+      this.formatFlow(balanceFlow);
+    
+    // 设置数据源
     this.settings.dataSource = {
       fee: {
-        number: this.fee.number,
+        number: balance
       },
       voice: {
-        number: this.voice.number,
-        percent: this.voice.percent,
+        number: voiceData.balance,
+        percent: voiceData.total > 0 ? ((voiceData.balance / voiceData.total) * 100).toFixed(2) : '0.00'
       },
       flow: {
-        en: this.flow.en,
-        number: this.flow.number,
-        unit: this.flow.unit,
-        percent: this.flow.percent,
-        title: this.flow.title,
-      },
+        title: showUsedFlow === 'true' ? '已用流量' : '剩余流量',
+        percent: totalFlow > 0 ? ((balanceFlow / totalFlow) * 100).toFixed(2) : '0.00',
+        number: flowObj.amount,
+        unit: flowObj.unit,
+        en: flowObj.unit
+      }
     };
     this.saveSettings(false);
   };
@@ -1431,6 +1475,7 @@ class Widget extends DmYY {
     if (config.runsInApp) {
       const widgetInitConfig = {
         china_telecom_url: "@yy_10000.china_telecom_loginUrl",
+        data_source: "@yy_10000.data_source"  // 数据源选择
       };
       this.registerAction({
         title: '组件配置',
@@ -1544,6 +1589,19 @@ class Widget extends DmYY {
             onClick: () => {
               this.reopenScript();
             },
+          },
+        ],
+      });
+      this.registerAction({
+        title: '数据源设置',
+        menu: [
+          {
+            url: 'https://raw.githubusercontent.com/anker1209/Scriptable/main/icon/data_source.png',
+            type: 'select',
+            title: '数据源选择',
+            options: ['telecom', 'boxjs'],  // 改为英文值
+            val: 'data_source',
+            defaultValue: 'telecom'
           },
         ],
       });
